@@ -1,0 +1,150 @@
+name: Flutter CI Pipeline
+
+# Trigger the workflow on push, pull request, and manual dispatch
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: false
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+
+# Required permissions for the workflow
+permissions:
+  contents: read
+  packages: read
+  issues: write
+  pull-requests: write
+
+env:
+  FLUTTER_VERSION: '3.47.2'
+  JAVA_VERSION: '17'
+  API_BASE_URL: ${{ secrets.API_BASE_URL || 'http://10.0.2.2:8000/api' }}
+
+jobs:
+  flutter-ci:
+    name: Flutter Build & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    # Add concurrency to avoid multiple runs on the same PR
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'gradle'
+
+      - name: Cache Flutter dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            build
+          key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-flutter-
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Verify Flutter installation
+        run: flutter --version
+
+      - name: Enable Flutter web support
+        run: flutter config --enable-web
+
+      - name: Install dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Check Dart formatting
+        run: dart format --output=none --set-exit-if-changed lib test
+
+      - name: Analyze Dart code
+        run: flutter analyze --fatal-infos --fatal-warnings
+
+      - name: Run static code analysis
+        run: flutter pub run dart_code_metrics:metrics analyze lib
+        continue-on-error: false
+
+      - name: Run unit and widget tests
+        run: flutter test --coverage --machine > test-results.json
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.json
+          retention-days: 30
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
+
+      - name: Build debug APK
+        run: |
+          flutter build apk --debug \
+            --dart-define=API_BASE_URL=${{ env.API_BASE_URL }}
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: student-management-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 30
+
+      - name: Build release APK (only on main branch)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          flutter build apk --release \
+            --dart-define=API_BASE_URL=${{ secrets.PRODUCTION_API_URL || 'https://api.production.com' }}
+
+      - name: Upload release APK
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: student-management-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
+
+      - name: Build web app
+        run: |
+          flutter build web --release \
+            --dart-define=API_BASE_URL=${{ env.API_BASE_URL }}
+
+      - name: Upload web build
+        uses: actions/upload-artifact@v4
+        with:
+          name: student-management-web-build
+          path: build/web/
+          retention-days: 30
